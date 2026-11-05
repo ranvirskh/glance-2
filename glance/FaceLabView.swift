@@ -627,7 +627,7 @@ private struct IdentityRow: View {
     let delete: () -> Void
 
     private var posesCaptured: Int {
-        Set(identity.samples.compactMap(\.pose)).count
+        Set(identity.samples.compactMap(\.pose).filter { $0 != FaceEnrollmentStore.learnedPose }).count
     }
 
     var body: some View {

@@ -34,7 +34,8 @@ enum KeychainError: LocalizedError {
 }
 
 enum KeychainManager {
-    nonisolated static let service = "com.jonathan.glance"
+    /// Follows the bundle ID so a differently-signed build gets its own items instead of seeing the release app's. Release is unchanged.
+    nonisolated static let service = BuildFlavor.isDevCopy ? (Bundle.main.bundleIdentifier ?? "com.jonathan.glance.dev") : "com.jonathan.glance"
 
     /// Attributes-only existence check — never prompts, even for access-controlled items.
     nonisolated static func exists(account: String) -> Bool {

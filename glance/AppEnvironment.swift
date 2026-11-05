@@ -8,6 +8,21 @@
 import Foundation
 import Observation
 
+enum BuildFlavor {
+    /// What this build calls itself in the UI, so the dev copy is never mistaken for the release app.
+    nonisolated static var appName: String { isDevCopy ? "Glance 2" : "Glance" }
+
+    /// A Debug build under a different bundle ID than the release app: gets its own storage (so it can't see or delete the release
+    /// app's data) and easier face enrollment. Release builds are never dev copies, whatever their bundle ID.
+    nonisolated static let isDevCopy: Bool = {
+        #if DEBUG
+        Bundle.main.bundleIdentifier != "com.jonathan.glance"
+        #else
+        false
+        #endif
+    }()
+}
+
 @Observable
 @MainActor
 final class AppEnvironment {

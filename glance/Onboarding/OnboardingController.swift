@@ -348,10 +348,13 @@ final class OnboardingController {
     private let samplesPerPose = 2
     /// Consecutive matching frames required before a capture fires — debounces a lucky
     /// frame near a pose boundary.
-    private let requiredMatchStreak = 3
+    private let requiredMatchStreak = OnboardingController.isDevBuild ? 2 : 3
     /// Wait this long after yaw/pitch matches before samples count, so the user has
     /// settled into the turn rather than being captured mid-motion.
-    private let poseHoldDuration: Duration = .milliseconds(500)
+    private let poseHoldDuration: Duration = .milliseconds(OnboardingController.isDevBuild ? 250 : 500)
+    /// Any build not signed as the release app gets easier enrollment (wider pose bands, smaller face, shorter holds).
+    /// Enrollment only — the unlock match threshold is untouched.
+    nonisolated private static let isDevBuild = BuildFlavor.isDevCopy
     /// Permissive floor for Vision's capture-quality score (no fixed universal cutoff) —
     /// better to accept a mediocre sample than stall the whole flow.
     private let qualityFloor: Float = 0.2
@@ -360,7 +363,7 @@ final class OnboardingController {
     private let initialCaptureDelay: Duration = .seconds(1.5)
     /// Enrollment wants a closer face than unlock's bystander cutoff
     private var enrollmentMinimumFaceWidth: Float {
-        max(FaceRecognitionPipeline.minimumProminentFaceWidth, 0.2)
+        Self.isDevBuild ? 0.12 : max(FaceRecognitionPipeline.minimumProminentFaceWidth, 0.2)
     }
 
     // Pose-matching bands, in radians. Yaw: left turn is positive, matching the mirrored
@@ -374,7 +377,7 @@ final class OnboardingController {
     /// If a pose takes longer than this, matching bands widen by `stallWidenFactor` so an
     /// unusual camera angle can't permanently strand the user.
     private let stallTimeout: Duration = .seconds(12)
-    private let stallWidenFactor: Float = 1.25
+    private let stallWidenFactor: Float = OnboardingController.isDevBuild ? 1.8 : 1.25
 
     private(set) var currentPoseIndex = 0
     private(set) var capturedForCurrentPose = 0
@@ -922,7 +925,7 @@ final class OnboardingController {
     }
 
     private func poseMatches(yaw: Float, pitch: Float, pose: EnrollmentPose, widened: Bool) -> Bool {
-        let factor = (widened ? stallWidenFactor : 1.0) * pose.matchLeniency
+        let factor = (widened || Self.isDevBuild ? stallWidenFactor : 1.0) * pose.matchLeniency
         return yawMatches(yaw, band: pose.yawBand, factor: factor)
             && pitchMatches(pitch, band: pose.pitchBand, factor: factor)
     }

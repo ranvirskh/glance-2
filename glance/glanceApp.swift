@@ -26,7 +26,7 @@ struct glanceApp: App {
         DispatchQueue.main.async {
             delegate.bindOpenWindowAction { open(id: "settings") }
         }
-        return Window("Glance Settings", id: "settings") {
+        return Window("\(BuildFlavor.appName) Settings", id: "settings") {
             SettingsWindowView(environment: appDelegate.environment)
                 .onAppear {
                     delegate.bindOpenWindowAction { open(id: "settings") }
@@ -102,6 +102,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             presentOnboardingGate()
         }
+
+        // The session key only unwraps with Touch ID, and the lock screen has no UI to ask for it — so a relaunched app would sit
+        // locked and never face-unlock. Ask once at launch (only when a password is already stored; this never creates a key).
+        if SecureCredentialManager.hasStoredPassword(), !environment.pocController.isSessionUnlocked {
+            Task { await environment.pocController.unlockSession() }
+        }
     }
 
     /// Creates or removes the status item without changing whether the app is
@@ -129,6 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             icon?.size = NSSize(width: menuBarHeight * iconSize.width / iconSize.height, height: menuBarHeight)
         }
         item.button?.image = icon
+        item.button?.toolTip = BuildFlavor.appName
 
         let menu = NSMenu()
         // Refreshes `sessionMenuItem` right before the menu displays — see `menuNeedsUpdate` below.

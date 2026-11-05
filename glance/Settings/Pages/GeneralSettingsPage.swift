@@ -142,6 +142,18 @@ struct GeneralSettingsPage: View {
                         GlanceToggle(isOn: $settings.autoRetryOnce)
                     }
                     SettingsGroupDivider()
+                    SettingsRowContent(title: "Keep learning my face") {
+                        GlanceToggle(isOn: $settings.adaptiveLearningEnabled)
+                    }
+                    SettingsGroupDivider()
+                    SettingsRowContent(title: "Unlock Chrome Touch ID prompts") {
+                        GlanceToggle(isOn: $settings.interceptSystemAuth)
+                    }
+                    SettingsGroupDivider()
+                    SettingsRowContent(title: "Also unlock other apps' password prompts") {
+                        GlanceToggle(isOn: $settings.interceptAnyPasswordPrompt)
+                    }
+                    SettingsGroupDivider()
                     SettingsRowContent(title: "Haptic feedback") {
                         GlanceToggle(isOn: $settings.hapticFeedbackEnabled)
                     }

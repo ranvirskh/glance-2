@@ -114,6 +114,9 @@ final class GlanceSettings {
         static let retryOnHover = "GlanceSettings.retryOnHover"
         static let faceDetectionSeconds = "GlanceSettings.faceDetectionSeconds"
         static let autoRetryOnce = "GlanceSettings.autoRetryOnce"
+        static let interceptSystemAuth = "GlanceSettings.interceptSystemAuth"
+        static let adaptiveLearning = "GlanceSettings.adaptiveLearning"
+        static let interceptAnyPasswordPrompt = "GlanceSettings.interceptAnyPasswordPrompt"
         static let hapticFeedbackEnabled = "GlanceSettings.hapticFeedbackEnabled"
         static let showsInMenuBar = "GlanceSettings.showsInMenuBar"
         static let preferredDisplayID = "GlanceSettings.preferredDisplayID"
@@ -134,6 +137,20 @@ final class GlanceSettings {
 
     var isFaceUnlockEnabled: Bool {
         didSet { defaults.set(isFaceUnlockEnabled, forKey: Key.isFaceUnlockEnabled) }
+    }
+    /// Face-scan Chrome's Touch ID prompts and type the stored password into them. Off by default: it types the real password into a dialog.
+    var interceptSystemAuth: Bool {
+        didSet { defaults.set(interceptSystemAuth, forKey: Key.interceptSystemAuth) }
+    }
+    /// Extends `interceptSystemAuth` from Chrome's prompts to any app's system password/Touch ID prompt. Off by default: any app can
+    /// raise one of these, so with this on, a face match types your password into whichever app asked.
+    var interceptAnyPasswordPrompt: Bool {
+        didSet { defaults.set(interceptAnyPasswordPrompt, forKey: Key.interceptAnyPasswordPrompt) }
+    }
+    /// After a confident, liveness-confirmed match, store that capture as an extra sample so the profile follows small changes in
+    /// how you look. Needs liveness checks on (a photo must never be able to teach the profile).
+    var adaptiveLearningEnabled: Bool {
+        didSet { defaults.set(adaptiveLearningEnabled, forKey: Key.adaptiveLearning) }
     }
     var matchThreshold: Float {
         didSet { defaults.set(matchThreshold, forKey: Key.matchThreshold) }
@@ -330,6 +347,9 @@ final class GlanceSettings {
             .map { min(max($0, Self.faceDetectionRange.lowerBound), Self.faceDetectionRange.upperBound) }
             ?? 5
         autoRetryOnce = defaults.object(forKey: Key.autoRetryOnce) as? Bool ?? false
+        interceptSystemAuth = defaults.object(forKey: Key.interceptSystemAuth) as? Bool ?? false
+        adaptiveLearningEnabled = defaults.object(forKey: Key.adaptiveLearning) as? Bool ?? true
+        interceptAnyPasswordPrompt = defaults.object(forKey: Key.interceptAnyPasswordPrompt) as? Bool ?? false
         hapticFeedbackEnabled = defaults.object(forKey: Key.hapticFeedbackEnabled) as? Bool ?? true
         // Keep the icon available for existing and new installs unless the
         // user explicitly opts into the background-only mode.

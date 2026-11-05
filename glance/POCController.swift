@@ -8,6 +8,11 @@
 
 import Foundation
 import Observation
+import OSLog
+
+private struct FocusLost: LocalizedError {
+    var errorDescription: String? { "The password field lost focus, so nothing was typed." }
+}
 
 @Observable
 @MainActor
@@ -49,6 +54,7 @@ final class POCController {
         } catch {
             isSessionUnlocked = false
             sessionError = error.localizedDescription
+            Logger(subsystem: "glance.auth", category: "session").error("session unlock failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -90,7 +96,9 @@ final class POCController {
     /// buffer before returning. When `requireAuthoritativeLock` is true (the
     /// auto-trigger path), refuses to inject unless the CGSession dictionary
     /// confirms the screen is actually locked.
-    func injectStoredPassword(requireAuthoritativeLock: Bool = false) async {
+    /// `beforeTyping` runs on the typing thread after the password is decrypted and right before the first keystroke; returning false
+    /// types nothing. It closes the gap between "the field had focus" and "we typed" (e.g. the dialog was cancelled in between).
+    func injectStoredPassword(requireAuthoritativeLock: Bool = false, beforeTyping: (@Sendable () -> Bool)? = nil) async {
         guard KeystrokeInjector.isAccessibilityTrusted() else {
             statusMessage = "Accessibility not granted — open System Settings and enable glance."
             return
@@ -112,6 +120,7 @@ final class POCController {
             try await Task.detached(priority: .userInitiated) {
                 var bytes = try SecureCredentialManager.readPassword()
                 defer { bytes.resetBytes(in: 0..<bytes.count) }
+                if let beforeTyping, !beforeTyping() { throw FocusLost() }
                 try KeystrokeInjector.typeAndReturn(bytes)
             }.value
             statusMessage = "Injected stored password + Return at \(Date().formatted(date: .omitted, time: .standard))"

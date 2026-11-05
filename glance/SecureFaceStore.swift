@@ -23,7 +23,9 @@ nonisolated enum SecureFaceStore {
     /// Distinct filename/extension so plaintext can never be mistaken for ciphertext.
     private static let fileURL: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let directory = appSupport.appendingPathComponent("glance", isDirectory: true)
+        // A differently-signed build (e.g. a dev copy) can't read the release app's key, so it must not share — or offer to delete — its file.
+        let name = BuildFlavor.isDevCopy ? "glance-dev" : "glance"
+        let directory = appSupport.appendingPathComponent(name, isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.appendingPathComponent("face-identities.enc")
     }()

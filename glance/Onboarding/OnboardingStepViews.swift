@@ -17,7 +17,7 @@ struct IntroStepView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Glance")
+                Text(BuildFlavor.appName)
                     .font(GlanceTheme.Font.title)
                     .foregroundStyle(GlanceTheme.textPrimary)
                 Text("Face Unlock for Mac")

@@ -124,6 +124,9 @@ final class FaceEnrollmentStore {
     }
 
     private init() {
+        #if DEBUG
+        Self.checkLearningRules()
+        #endif
         reloadIfUnlocked()
         // Reload whenever the session key changes, regardless of call site, so this store can't go stale
         // relative to whichever UI changed the session.
@@ -188,6 +191,78 @@ final class FaceEnrollmentStore {
         try persist()
         return true
     }
+
+    /// `FaceSample.pose` tag for samples gathered from real unlocks rather than guided enrollment.
+    nonisolated static let learnedPose = "learned"
+    /// Learned samples kept per identity. Capped well below the 18 enrolled ones so learning can refine the template but never take it over.
+    nonisolated static let maxLearnedSamples = 12
+    nonisolated private static let minLearnInterval: TimeInterval = 30
+    /// A new capture this close to an existing sample adds nothing to learn from.
+    nonisolated private static let duplicateSimilarity: Float = 0.95
+
+    /// Adds a sample from a confirmed unlock to `identityID`. Callers decide whether the match was trustworthy enough to learn from;
+    /// this only enforces storage rules: same embedder, rate limit, no near-duplicates, and the oldest learned sample makes room at
+    /// the cap. Guided-enrollment samples are never evicted. Returns whether a sample was stored.
+    @discardableResult
+    func learnSample(for identityID: UUID, embedding: [Float], quality: Float?, embedder: FaceEmbedder) throws -> Bool {
+        guard hasLoadedSuccessfully,
+              let index = identities.firstIndex(where: { $0.id == identityID }),
+              identities[index].modelIdentifier == embedder.modelIdentifier else { return false }
+
+        let now = Date()
+        let sample = FaceSample(embedding: embedding, pose: Self.learnedPose, capturedAt: now, quality: quality)
+        guard let samples = Self.samples(afterLearning: sample, into: identities[index].samples, now: now) else { return false }
+
+        var updated = identities
+        updated[index].samples = samples
+        try SecureFaceStore.save(updated)
+        identities = updated
+        return true
+    }
+
+    /// The storage rules for learning, kept pure so they can be checked without a store: nil when the sample should be skipped
+    /// (too soon after the last learned one, or a near-duplicate); otherwise the sample list with it added and, at the cap,
+    /// the oldest *learned* sample removed. Enrollment samples are never removed.
+    nonisolated static func samples(afterLearning sample: FaceSample, into samples: [FaceSample], now: Date) -> [FaceSample]? {
+        let learned = samples.filter { $0.pose == learnedPose }
+        if let latest = learned.map(\.capturedAt).max(), now.timeIntervalSince(latest) < minLearnInterval { return nil }
+        guard !samples.contains(where: { FaceEmbedding.cosineSimilarity(sample.embedding, $0.embedding) > duplicateSimilarity }) else { return nil }
+
+        var result = samples + [sample]
+        if learned.count >= maxLearnedSamples,
+           let oldest = result.enumerated().filter({ $0.element.pose == learnedPose })
+               .min(by: { $0.element.capturedAt < $1.element.capturedAt })?.offset {
+            result.remove(at: oldest)
+        }
+        return result
+    }
+
+    #if DEBUG
+    /// Runs once at first use in Debug builds. Orthogonal one-hot vectors stand in for faces: identical = similarity 1, different = 0.
+    private static func checkLearningRules() {
+        func vector(_ i: Int) -> [Float] { (0..<64).map { $0 == i ? 1 : 0 } }
+        let start = Date()
+        let enrolled = (0..<3).map { FaceSample(embedding: vector($0), pose: "front", capturedAt: start, quality: 1) }
+        var samples = enrolled
+        for i in 0..<(maxLearnedSamples + 1) {
+            let now = start.addingTimeInterval(Double(i + 1) * (minLearnInterval + 1))
+            let next = FaceSample(embedding: vector(10 + i), pose: learnedPose, capturedAt: now, quality: 1)
+            guard let updated = Self.samples(afterLearning: next, into: samples, now: now) else {
+                assertionFailure("a fresh, distinct sample must be learned"); return
+            }
+            samples = updated
+            // Too soon after the last one, and an exact duplicate: both must be refused.
+            let tooSoon = FaceSample(embedding: vector(50), pose: learnedPose, capturedAt: now, quality: 1)
+            assert(Self.samples(afterLearning: tooSoon, into: samples, now: now.addingTimeInterval(1)) == nil)
+            let later = now.addingTimeInterval(minLearnInterval + 1)
+            assert(Self.samples(afterLearning: next, into: samples, now: later) == nil)
+        }
+        let learned = samples.filter { $0.pose == learnedPose }
+        assert(learned.count == maxLearnedSamples, "learned samples are capped")
+        assert(samples.filter { $0.pose == "front" } == enrolled, "enrollment samples are never evicted")
+        assert(!learned.contains { $0.embedding == vector(10) }, "the oldest learned sample is the one evicted")
+    }
+    #endif
 
     /// Commits a whole guided enrollment in a single write. When `existingID` names a known identity, its samples are
     /// replaced wholesale (a recapture is a redo, not an append) and it can be renamed since matching is by id.
