@@ -76,7 +76,8 @@ final class SystemAuthInterceptor {
         let chromeRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: Self.chromeBundleID).isEmpty
         if chromeRunning || currentPrompt != nil || allowsAnyApp() {
             guard timer == nil else { return }
-            timer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+            // 80ms: the dialog is visible until the next tick notices it, so this is the length of the flash before the cover appears.
+            timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.tick() }
             }
             // Lets macOS coalesce these wakeups with other timers instead of waking the CPU for each one.
@@ -96,7 +97,7 @@ final class SystemAuthInterceptor {
         let recentChrome = lastChromeFrontAt.map { Date().timeIntervalSince($0) < Self.chromeRecency } ?? false
         // Battery: full 120ms rate only while a prompt is plausible (Chrome frontmost/just was, or one is up); otherwise ~1s.
         let anyApp = allowsAnyApp()
-        guard recentChrome || currentPrompt != nil || tickCount % (anyApp ? 4 : 8) == 0 else { return }
+        guard recentChrome || currentPrompt != nil || tickCount % (anyApp ? 6 : 12) == 0 else { return }
         // Nothing to watch while the display is off.
         guard CGDisplayIsAsleep(CGMainDisplayID()) == 0 else { return }
 
@@ -114,7 +115,7 @@ final class SystemAuthInterceptor {
         let chromeFront = chromeApp?.isActive ?? false
         // The accessibility-tree walk is the costly part: look for a *new* Chrome sheet every 3rd tick, but keep checking one we already track.
         let tracking = currentPrompt != nil
-        let scanSheet = tickCount % 3 == 0 || tracking
+        let scanSheet = tickCount % 4 == 0 || tracking
         Task.detached(priority: .utility) { [weak self] in
             let found = Self.findPrompt(chromePID: chromePID, chromeFrontmost: chromeFront, chromeRecent: recentChrome, scanSheet: scanSheet, tracking: tracking, anyApp: anyApp)
             await self?.finishScan(found)
@@ -214,8 +215,13 @@ final class SystemAuthInterceptor {
 
     /// Drops the cover. Safe to call when nothing is hidden.
     func restoreCurrentPrompt() {
-        shield?.orderOut(nil)
+        guard let panel = shield else { return }
         shield = nil
+        // Fades out instead of popping, so the cover leaves the way the notch animation does.
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.18
+            panel.animator().alphaValue = 0
+        }, completionHandler: { panel.orderOut(nil) })
     }
 
     func waitUntilGone(timeout: Duration) async {
@@ -256,10 +262,16 @@ final class SystemAuthInterceptor {
         Task { [weak self, weak panel] in
             guard let image = await Self.captureBackdrop(of: cgFrame, excluding: windowID),
                   let self, let panel, self.shield === panel else { return }
+            // Crossfaded over the blur rather than swapped in, so the cover doesn't visibly jump from dark to the page.
             let view = NSImageView(frame: NSRect(origin: .zero, size: frame.size))
             view.image = image
             view.imageScaling = .scaleAxesIndependently
-            panel.contentView = view
+            view.alphaValue = 0
+            panel.contentView?.addSubview(view)
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.12
+                view.animator().alphaValue = 1
+            }, completionHandler: nil)
         }
     }
 
