@@ -116,6 +116,7 @@ final class GlanceSettings {
         static let autoRetryOnce = "GlanceSettings.autoRetryOnce"
         static let interceptSystemAuth = "GlanceSettings.interceptSystemAuth"
         static let adaptiveLearning = "GlanceSettings.adaptiveLearning"
+        static let showScanInIsle = "GlanceSettings.showScanInIsle"
         static let interceptAnyPasswordPrompt = "GlanceSettings.interceptAnyPasswordPrompt"
         static let hapticFeedbackEnabled = "GlanceSettings.hapticFeedbackEnabled"
         static let showsInMenuBar = "GlanceSettings.showsInMenuBar"
@@ -145,6 +146,10 @@ final class GlanceSettings {
     /// Extends face-fill from Chrome's prompts to any app's system password/Touch ID prompt (Safari, System Settings, installers…).
     /// On by default. Any app can raise one of these, so with this on a face match types your password into whichever app asked —
     /// turn it off to limit face-fill to Chrome.
+    /// While Isle (the notch app) is running, show the in-app prompt scan there instead of drawing Glance's own notch animation.
+    var showScanInIsle: Bool {
+        didSet { defaults.set(showScanInIsle, forKey: Key.showScanInIsle) }
+    }
     var interceptAnyPasswordPrompt: Bool {
         didSet { defaults.set(interceptAnyPasswordPrompt, forKey: Key.interceptAnyPasswordPrompt) }
     }
@@ -350,6 +355,7 @@ final class GlanceSettings {
         autoRetryOnce = defaults.object(forKey: Key.autoRetryOnce) as? Bool ?? false
         interceptSystemAuth = defaults.object(forKey: Key.interceptSystemAuth) as? Bool ?? false
         adaptiveLearningEnabled = defaults.object(forKey: Key.adaptiveLearning) as? Bool ?? true
+        showScanInIsle = defaults.object(forKey: Key.showScanInIsle) as? Bool ?? true
         interceptAnyPasswordPrompt = defaults.object(forKey: Key.interceptAnyPasswordPrompt) as? Bool ?? true
         hapticFeedbackEnabled = defaults.object(forKey: Key.hapticFeedbackEnabled) as? Bool ?? true
         // Keep the icon available for existing and new installs unless the

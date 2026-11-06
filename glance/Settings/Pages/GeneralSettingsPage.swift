@@ -142,6 +142,10 @@ struct GeneralSettingsPage: View {
                         GlanceToggle(isOn: $settings.autoRetryOnce)
                     }
                     SettingsGroupDivider()
+                    SettingsRowContent(title: "Show the scan in Isle when it's running") {
+                        GlanceToggle(isOn: $settings.showScanInIsle)
+                    }
+                    SettingsGroupDivider()
                     SettingsRowContent(title: "Keep learning my face") {
                         GlanceToggle(isOn: $settings.adaptiveLearningEnabled)
                     }

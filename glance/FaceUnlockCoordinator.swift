@@ -117,7 +117,8 @@ final class FaceUnlockCoordinator {
         }
 
         Self.lockLog.notice("prompt accepted: covering it and scanning")
-        if showsUI {
+        IslandBridge.show(symbol: "faceid", title: "Face ID", subtitle: "Looking for you…")
+        if usesNotch(for: .inSessionAuth) {
             NotchOverlayController.shared.present(onRetry: { [weak self] in self?.startScanCycle(.inSessionAuth) })
         }
         startScanCycle(.inSessionAuth)
@@ -130,7 +131,13 @@ final class FaceUnlockCoordinator {
         scanTask = nil
         scanGeneration &+= 1
         camera.stop()
-        if showsUI { NotchOverlayController.shared.dismissImmediately() }
+        if usesNotch(for: .inSessionAuth) { NotchOverlayController.shared.dismissImmediately() }
+    }
+
+    /// Whether Glance draws its own notch scan for this kind of scan. In-app prompts are shown by Isle instead when it is running.
+    /// The lock-screen scan always uses Glance's own overlay: Isle's presence on the lock screen isn't something to rely on.
+    private func usesNotch(for context: ScanContext) -> Bool {
+        showsUI && !(context == .inSessionAuth && IslandBridge.isleShowsScan)
     }
 
     private func isContextLive(_ context: ScanContext) -> Bool {
@@ -328,7 +335,7 @@ final class FaceUnlockCoordinator {
             return
         }
 
-        let showsUI = self.showsUI
+        let showsUI = usesNotch(for: context)
         if showsUI {
             NotchOverlayController.shared.beginScanning()
         }
@@ -344,6 +351,7 @@ final class FaceUnlockCoordinator {
         guard generation == scanGeneration else { return }
 
         camera.stop()
+        if context == .inSessionAuth { reportToIsle(outcome) }
         let sinceArm = lastArmedAt.map { String(describing: ContinuousClock.now - $0) } ?? "n/a"
         Self.lockLog.notice("scan finished: \(String(describing: outcome), privacy: .public) (\(String(describing: context), privacy: .public)) \(sinceArm, privacy: .public) after arming")
 
@@ -383,6 +391,18 @@ final class FaceUnlockCoordinator {
             } else {
                 scheduleAutoRetryIfEnabled(after: headlessRetryDelay)
             }
+        }
+    }
+
+    /// The scan's result as Isle's "Face ID" pop-up (does nothing unless Isle is running and showing the scan).
+    private func reportToIsle(_ outcome: ScanOutcome) {
+        switch outcome {
+        case .matched: IslandBridge.show(symbol: "checkmark.circle.fill", title: "Unlocked", subtitle: "Password filled in")
+        case .consistentlyWrongFace: IslandBridge.show(symbol: "xmark.circle.fill", title: "Face not recognized")
+        case .spoofSuspected: IslandBridge.show(symbol: "exclamationmark.shield.fill", title: "Couldn't confirm a live face")
+        case .noResolution: IslandBridge.show(symbol: "faceid", title: "No face detected")
+        case .passwordFieldUnavailable:
+            IslandBridge.show(symbol: "exclamationmark.triangle.fill", title: "Matched, but couldn't fill it in", subtitle: "Use Touch ID or type it")
         }
     }
 
