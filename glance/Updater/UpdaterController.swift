@@ -56,7 +56,9 @@ final class UpdaterController {
     /// Safe to call even with a placeholder `SUPublicEDKey` — `SPUStandardUpdaterController` logs and alerts on a misconfigured
     /// Sparkle setup itself rather than throwing.
     func start() {
-        controller.startUpdater()
+        // Deliberately not started: this fork has no update feed or signing key of its own, and the original author's feed
+        // would replace it with their build. Add SUFeedURL + SUPublicEDKey to Info.plist, then call `controller.startUpdater()`.
+        // (Left unstarted, `canCheckForUpdates` stays false, so the About page's button is disabled.)
     }
 
     /// User-initiated "Check for Updates" — shows Sparkle's standard progress UI.

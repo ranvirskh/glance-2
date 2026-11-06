@@ -71,7 +71,10 @@ final class FaceUnlockCoordinator {
     /// Latched once an in-session scan matches, so the prompt changing under the password sequence doesn't cancel it.
     private var inSessionMatched = false
     private var lastInSessionTypedAt: ContinuousClock.Instant?
+    /// Set when a prompt returns right after the password was typed (it was wrong). No auto-typing until then, or until the session is re-unlocked.
+    private var typingPausedUntil: ContinuousClock.Instant?
     private static let retryCooldown: Duration = .seconds(20)
+    private static let wrongPasswordPause: Duration = .seconds(600)
     private let interceptor = SystemAuthInterceptor()
     private static let lockLog = Logger(subsystem: "glance.auth", category: "unlock")
     /// Vision's capture-quality score a frame needs before it may teach the profile. Laptop webcams at lock-screen distance
@@ -92,6 +95,10 @@ final class FaceUnlockCoordinator {
         interceptor.allowsAnyApp = { GlanceSettings.shared.interceptAnyPasswordPrompt }
         interceptor.onPromptAppeared = { [weak self] _ in self?.handleSystemPrompt() }
         interceptor.onPromptGone = { [weak self] in self?.handleSystemPromptGone() }
+        // Re-entering the password in Glance (session unlock) is the user fixing a stale one, so typing may resume.
+        NotificationCenter.default.addObserver(forName: .secureCredentialSessionDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.typingPausedUntil = nil }
+        }
         interceptor.start()
     }
 
@@ -100,7 +107,14 @@ final class FaceUnlockCoordinator {
     private func handleSystemPrompt() {
         // After typing the password once, a dialog that comes straight back means it was wrong (e.g. the Mac password changed).
         // Typing it again would only run up failed attempts, so leave the prompt to the user for a while.
-        if let typedAt = lastInSessionTypedAt, ContinuousClock.now - typedAt < Self.retryCooldown { return }
+        if let typedAt = lastInSessionTypedAt, ContinuousClock.now - typedAt < Self.retryCooldown {
+            typingPausedUntil = .now + Self.wrongPasswordPause
+            return
+        }
+        if let until = typingPausedUntil {
+            if ContinuousClock.now < until { return }
+            typingPausedUntil = nil
+        }
         // Any unmet gate leaves the prompt untouched, so Touch ID / typing the password works as normal.
         guard isEnabled, GlanceSettings.shared.interceptSystemAuth || GlanceSettings.shared.interceptAnyPasswordPrompt,
               !LockMonitor.isScreenActuallyLocked(),

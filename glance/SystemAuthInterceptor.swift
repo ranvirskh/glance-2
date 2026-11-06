@@ -10,6 +10,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import Darwin
 import OSLog
 
 /// An on-screen auth prompt. AXUIElement is a CF reference that is safe to hand between threads.
@@ -35,7 +36,6 @@ final class SystemAuthInterceptor {
     private(set) var currentPrompt: AuthPrompt?
 
     private static let chromeBundleID = "com.google.Chrome"
-    private static let passwordsBundleID = "com.apple.Passwords"
     private nonisolated static let systemOwners: Set<String> = ["CoreAuthUI", "SecurityAgent", "coreautha"]
     /// A system prompt only counts as Chrome-triggered if Chrome was frontmost this recently (CoreAuthUI takes focus when it appears).
     private static let chromeRecency: TimeInterval = 5
@@ -109,8 +109,8 @@ final class SystemAuthInterceptor {
     /// 120ms polling only while Chrome is running (or a prompt is up) — otherwise there is nothing to watch.
     private func refreshTimer() {
         let chromeRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: Self.chromeBundleID).isEmpty
-        let passwordsRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: Self.passwordsBundleID).isEmpty
-        if chromeRunning || passwordsRunning || currentPrompt != nil || allowsAnyApp() {
+        let lockAppRunning = AuthPromptMatching.lockScreenBundleIDs.contains { !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty }
+        if chromeRunning || lockAppRunning || currentPrompt != nil || allowsAnyApp() {
             if timer == nil { setTimerInterval(Self.idleInterval) }
         } else {
             timer?.invalidate()
@@ -143,12 +143,10 @@ final class SystemAuthInterceptor {
         let recentChrome = lastChromeFrontAt.map { Date().timeIntervalSince($0) < Self.chromeRecency } ?? false
         // Battery: fast only while a prompt is plausible (Chrome frontmost/just was, an app just came forward, or one is up).
         let anyApp = allowsAnyApp()
-        // The Passwords app shows its own lock screen (a plain window, not a system dialog), so it is watched whenever it is in front.
+        // Passwords and Notes show their own lock screen (a plain window, not a system dialog), so they are watched while in front.
         let front = NSWorkspace.shared.frontmostApplication
-        let passwordsFront = front?.bundleIdentifier == Self.passwordsBundleID
-        // Other Apple apps (Notes' locked notes, ...) use the same Mac password, so their lock screens qualify too. Never third-party apps.
-        let lockPID = front?.bundleIdentifier?.hasPrefix("com.apple.") == true ? front?.processIdentifier : nil
-        let hot = recentChrome || currentPrompt != nil || passwordsFront || (anyApp && Date() < boostUntil)
+        let lockPID = front?.bundleIdentifier.flatMap { AuthPromptMatching.lockScreenBundleIDs.contains($0) ? front?.processIdentifier : nil }
+        let hot = recentChrome || currentPrompt != nil || lockPID != nil || (anyApp && Date() < boostUntil)
         setTimerInterval(hot ? Self.hotInterval : (anyApp ? Self.idleInterval : 1.0))
         // Nothing to watch while the display is off.
         guard CGDisplayIsAsleep(CGMainDisplayID()) == 0 else { return }
@@ -217,9 +215,14 @@ final class SystemAuthInterceptor {
 
     /// An Apple app's own lock screen ("Passwords Is Locked", "This note is locked"): an ordinary window (not a dialog or sheet).
     private nonisolated static func findAppLock(pid: pid_t) -> AuthPrompt? {
-        let windows = axWindows(of: pid)
-        for window in windows where find(in: [window], where: { labels($0).contains { $0.contains(" is locked") } }) != nil {
-            guard let frame = windowFrame(window) else { continue }
+        guard isTrusted(pid: pid) else { return nil }
+        for window in axWindows(of: pid) {
+            // A lock label, in a window that also asks for a password (secure field, or "password"/"touch id" wording).
+            guard find(in: [window], where: { el in
+                      [kAXValueAttribute, kAXTitleAttribute].compactMap { string(el, $0) }.contains { AuthPromptMatching.isLockLabel(role: string(el, kAXRoleAttribute), text: $0) }
+                  }) != nil,
+                  find(in: [window], where: { isSecureField($0) || labels($0).contains(where: AuthPromptMatching.asksForPassword) }) != nil,
+                  let frame = windowFrame(window) else { continue }
             return AuthPrompt(key: "applock-\(pid)", pid: pid, frame: frame, axWindow: window, roots: [window])
         }
         return nil
@@ -232,7 +235,7 @@ final class SystemAuthInterceptor {
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
         for info in list {
             guard let owner = info[kCGWindowOwnerName as String] as? String, systemOwners.contains(owner),
-                  let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  let pid = info[kCGWindowOwnerPID as String] as? pid_t, isTrusted(pid: pid),
                   let number = info[kCGWindowNumber as String] as? Int,
                   let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: boundsDict),
@@ -256,6 +259,7 @@ final class SystemAuthInterceptor {
 
     /// An auth sheet or dialog inside an app's own window (Chrome's, Safari's AutoFill sheet, ...), found by its Touch ID / password wording.
     private nonisolated static func findSheet(pid: pid_t) -> AuthPrompt? {
+        guard isTrusted(pid: pid) else { return nil }
         for window in axWindows(of: pid) {
             let candidates = children(window, kAXChildrenAttribute) + children(window, "AXSheets") + [window]
             for element in candidates {
@@ -351,8 +355,14 @@ final class SystemAuthInterceptor {
     }
 
     /// Lowercased, with Apple's typographic ellipsis/apostrophe folded to ASCII so "Use Password…" matches "use password...".
-    private nonisolated static func normalized(_ text: String) -> String {
-        text.lowercased().replacingOccurrences(of: "…", with: "...").replacingOccurrences(of: "’", with: "'")
+    private nonisolated static func normalized(_ text: String) -> String { AuthPromptMatching.normalized(text) }
+
+    /// The password is only ever typed into Apple's own apps/daemons and Chrome, so a third-party app (or a fake dialog) that
+    /// merely shows "Enter password" can't receive it. Judged by the executable's path, which an app cannot rename.
+    private nonisolated static func isTrusted(pid: pid_t) -> Bool {
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return false }
+        return AuthPromptMatching.isTrustedExecutablePath(String(cString: buffer))
     }
 
     private nonisolated static func labels(_ element: AXUIElement) -> [String] {
@@ -372,15 +382,16 @@ final class SystemAuthInterceptor {
     /// Wording only, never a bare secure field: Chrome's own save-password dialogs contain one, and they are not Touch ID prompts.
     private nonisolated static func containsAuthControls(_ root: AXUIElement) -> Bool {
         find(in: [root]) { element in
-            labels(element).contains { label in
-                ["touch id", "use password", "enter password", "verify it"].contains { label.contains($0) }
-            }
+            labels(element).contains { label in AuthPromptMatching.authSheetWording.contains { label.contains($0) } }
         } != nil
     }
 
     /// True while the system's keyboard focus is a secure text field. Used as the last check before typing the password.
     nonisolated static func isSecureFieldFocused() -> Bool {
-        focusedElement().map(isSecureField) ?? false
+        // The focused field must belong to a trusted process, so a field in some other app that took focus never gets the password.
+        guard let field = focusedElement(), isSecureField(field) else { return false }
+        var pid: pid_t = 0
+        return AXUIElementGetPid(field, &pid) == .success && isTrusted(pid: pid)
     }
 
     /// Depth-limited DFS. Skips web content: Chrome pages are huge, and a site's own password field must never match.
