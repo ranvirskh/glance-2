@@ -35,6 +35,7 @@ final class SystemAuthInterceptor {
     private(set) var currentPrompt: AuthPrompt?
 
     private static let chromeBundleID = "com.google.Chrome"
+    private static let passwordsBundleID = "com.apple.Passwords"
     private nonisolated static let systemOwners: Set<String> = ["CoreAuthUI", "SecurityAgent", "coreautha"]
     /// A system prompt only counts as Chrome-triggered if Chrome was frontmost this recently (CoreAuthUI takes focus when it appears).
     private static let chromeRecency: TimeInterval = 5
@@ -108,7 +109,8 @@ final class SystemAuthInterceptor {
     /// 120ms polling only while Chrome is running (or a prompt is up) — otherwise there is nothing to watch.
     private func refreshTimer() {
         let chromeRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: Self.chromeBundleID).isEmpty
-        if chromeRunning || currentPrompt != nil || allowsAnyApp() {
+        let passwordsRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: Self.passwordsBundleID).isEmpty
+        if chromeRunning || passwordsRunning || currentPrompt != nil || allowsAnyApp() {
             if timer == nil { setTimerInterval(Self.idleInterval) }
         } else {
             timer?.invalidate()
@@ -141,7 +143,9 @@ final class SystemAuthInterceptor {
         let recentChrome = lastChromeFrontAt.map { Date().timeIntervalSince($0) < Self.chromeRecency } ?? false
         // Battery: fast only while a prompt is plausible (Chrome frontmost/just was, an app just came forward, or one is up).
         let anyApp = allowsAnyApp()
-        let hot = recentChrome || currentPrompt != nil || (anyApp && Date() < boostUntil)
+        // The Passwords app shows its own lock screen (a plain window, not a system dialog), so it is watched whenever it is in front.
+        let passwordsPID = NSRunningApplication.runningApplications(withBundleIdentifier: Self.passwordsBundleID).first { $0.isActive }?.processIdentifier
+        let hot = recentChrome || currentPrompt != nil || passwordsPID != nil || (anyApp && Date() < boostUntil)
         setTimerInterval(hot ? Self.hotInterval : (anyApp ? Self.idleInterval : 1.0))
         // Nothing to watch while the display is off.
         guard CGDisplayIsAsleep(CGMainDisplayID()) == 0 else { return }
@@ -166,7 +170,7 @@ final class SystemAuthInterceptor {
         let tracking = currentPrompt != nil
         let scanSheet = tickCount % 4 == 0 || tracking
         Task.detached(priority: .utility) { [weak self] in
-            let found = Self.findPrompt(sheetPID: sheetPID, chromeFrontmost: chromeFront, chromeRecent: recentChrome, scanSheet: scanSheet, tracking: tracking, anyApp: anyApp)
+            let found = Self.findPrompt(sheetPID: sheetPID, chromeFrontmost: chromeFront, chromeRecent: recentChrome, scanSheet: scanSheet, tracking: tracking, anyApp: anyApp, passwordsPID: passwordsPID)
             await self?.finishScan(found)
         }
     }
@@ -200,10 +204,21 @@ final class SystemAuthInterceptor {
         AXUIElementSetAttributeValue(element, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
     }
 
-    private nonisolated static func findPrompt(sheetPID: pid_t?, chromeFrontmost: Bool, chromeRecent: Bool, scanSheet: Bool, tracking: Bool, anyApp: Bool) -> AuthPrompt? {
+    private nonisolated static func findPrompt(sheetPID: pid_t?, chromeFrontmost: Bool, chromeRecent: Bool, scanSheet: Bool, tracking: Bool, anyApp: Bool, passwordsPID: pid_t?) -> AuthPrompt? {
         // `tracking`: a prompt already accepted stays visible to us for as long as it is on screen, however long the user takes.
         if chromeRecent || chromeFrontmost || tracking || anyApp, let prompt = findSystemPrompt(tracking: tracking, anyApp: anyApp) { return prompt }
+        if scanSheet, let passwordsPID, let prompt = findPasswordsLock(pid: passwordsPID) { return prompt }
         if scanSheet, let sheetPID { return findSheet(pid: sheetPID) }
+        return nil
+    }
+
+    /// The Passwords app's "Passwords Is Locked" screen: an ordinary window (not a dialog or sheet) with either Touch ID or a password field.
+    private nonisolated static func findPasswordsLock(pid: pid_t) -> AuthPrompt? {
+        let windows = axWindows(of: pid)
+        for window in windows where find(in: [window], where: { labels($0).contains { $0.contains("passwords is locked") } }) != nil {
+            guard let frame = windowFrame(window) else { continue }
+            return AuthPrompt(key: "passwords-\(pid)", pid: pid, frame: frame, axWindow: window, roots: [window])
+        }
         return nil
     }
 
@@ -285,7 +300,9 @@ final class SystemAuthInterceptor {
             let focused = focusedElement().map { CFEqual($0, field) } ?? false
             return (focused, false)
         }
-        if press, let button = find(in: roots, where: isPasswordButton) {
+        // Passwords' Touch ID view has one unlabeled button (the "Enter Password…" one) next to the window controls, which have subroles.
+        let passwordsButton: (AXUIElement) -> Bool = { string($0, kAXRoleAttribute) == kAXButtonRole && string($0, kAXSubroleAttribute) == nil }
+        if press, let button = find(in: roots, where: prompt.key.hasPrefix("passwords-") ? passwordsButton : isPasswordButton) {
             AXUIElementPerformAction(button, kAXPressAction as CFString)
             return (false, true)
         }
