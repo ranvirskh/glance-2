@@ -127,6 +127,10 @@ final class FaceUnlockCoordinator {
                 prompt left alone: enabled=\(self.isEnabled) toggle=\(GlanceSettings.shared.interceptSystemAuth) \
                 sessionUnlocked=\(SecureCredentialManager.isSessionUnlocked) hasPassword=\(SecureCredentialManager.hasStoredPassword())
                 """)
+            // The one case the user can fix in seconds (every relaunch locks Glance's session), so say so instead of doing nothing.
+            if isEnabled, !SecureCredentialManager.isSessionUnlocked, SecureCredentialManager.hasStoredPassword() {
+                IslandBridge.show(symbol: "lock.fill", title: "Glance is locked", subtitle: "Unlock it in Settings → Password")
+            }
             return
         }
 
