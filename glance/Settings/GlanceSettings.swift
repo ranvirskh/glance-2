@@ -142,8 +142,9 @@ final class GlanceSettings {
     var interceptSystemAuth: Bool {
         didSet { defaults.set(interceptSystemAuth, forKey: Key.interceptSystemAuth) }
     }
-    /// Extends `interceptSystemAuth` from Chrome's prompts to any app's system password/Touch ID prompt. Off by default: any app can
-    /// raise one of these, so with this on, a face match types your password into whichever app asked.
+    /// Extends face-fill from Chrome's prompts to any app's system password/Touch ID prompt (Safari, System Settings, installers…).
+    /// On by default. Any app can raise one of these, so with this on a face match types your password into whichever app asked —
+    /// turn it off to limit face-fill to Chrome.
     var interceptAnyPasswordPrompt: Bool {
         didSet { defaults.set(interceptAnyPasswordPrompt, forKey: Key.interceptAnyPasswordPrompt) }
     }
@@ -349,7 +350,7 @@ final class GlanceSettings {
         autoRetryOnce = defaults.object(forKey: Key.autoRetryOnce) as? Bool ?? false
         interceptSystemAuth = defaults.object(forKey: Key.interceptSystemAuth) as? Bool ?? false
         adaptiveLearningEnabled = defaults.object(forKey: Key.adaptiveLearning) as? Bool ?? true
-        interceptAnyPasswordPrompt = defaults.object(forKey: Key.interceptAnyPasswordPrompt) as? Bool ?? false
+        interceptAnyPasswordPrompt = defaults.object(forKey: Key.interceptAnyPasswordPrompt) as? Bool ?? true
         hapticFeedbackEnabled = defaults.object(forKey: Key.hapticFeedbackEnabled) as? Bool ?? true
         // Keep the icon available for existing and new installs unless the
         // user explicitly opts into the background-only mode.

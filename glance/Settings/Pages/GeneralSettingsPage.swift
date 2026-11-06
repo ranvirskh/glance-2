@@ -150,7 +150,7 @@ struct GeneralSettingsPage: View {
                         GlanceToggle(isOn: $settings.interceptSystemAuth)
                     }
                     SettingsGroupDivider()
-                    SettingsRowContent(title: "Also unlock other apps' password prompts") {
+                    SettingsRowContent(title: "Unlock password prompts in any app") {
                         GlanceToggle(isOn: $settings.interceptAnyPasswordPrompt)
                     }
                     SettingsGroupDivider()

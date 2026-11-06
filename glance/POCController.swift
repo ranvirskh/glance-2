@@ -98,20 +98,22 @@ final class POCController {
     /// confirms the screen is actually locked.
     /// `beforeTyping` runs on the typing thread after the password is decrypted and right before the first keystroke; returning false
     /// types nothing. It closes the gap between "the field had focus" and "we typed" (e.g. the dialog was cancelled in between).
-    func injectStoredPassword(requireAuthoritativeLock: Bool = false, beforeTyping: (@Sendable () -> Bool)? = nil) async {
+    /// Returns whether the password was actually typed.
+    @discardableResult
+    func injectStoredPassword(requireAuthoritativeLock: Bool = false, beforeTyping: (@Sendable () -> Bool)? = nil) async -> Bool {
         guard KeystrokeInjector.isAccessibilityTrusted() else {
             statusMessage = "Accessibility not granted — open System Settings and enable glance."
-            return
+            return false
         }
         guard SecureCredentialManager.isSessionUnlocked else {
             statusMessage = "Session locked — authenticate with Touch ID first."
-            return
+            return false
         }
 
         if requireAuthoritativeLock {
             guard LockMonitor.isScreenActuallyLocked() else {
                 statusMessage = "Skipped: CGSession reports screen is not actually locked."
-                return
+                return false
             }
         }
 
@@ -124,8 +126,10 @@ final class POCController {
                 try KeystrokeInjector.typeAndReturn(bytes)
             }.value
             statusMessage = "Injected stored password + Return at \(Date().formatted(date: .omitted, time: .standard))"
+            return true
         } catch {
             statusMessage = "Injection failed: \(error.localizedDescription)"
+            return false
         }
     }
 }

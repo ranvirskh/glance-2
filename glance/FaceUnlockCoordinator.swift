@@ -74,6 +74,9 @@ final class FaceUnlockCoordinator {
     private static let retryCooldown: Duration = .seconds(20)
     private let interceptor = SystemAuthInterceptor()
     private static let lockLog = Logger(subsystem: "glance.auth", category: "unlock")
+    /// Vision's capture-quality score a frame needs before it may teach the profile. Laptop webcams at lock-screen distance
+    /// typically score ~0.3, so a higher bar meant learning never ran; the match-strength requirement is what keeps it safe.
+    private static let learningMinimumQuality: Float = 0.30
 
     init(pocController: POCController) {
         self.pocController = pocController
@@ -84,7 +87,7 @@ final class FaceUnlockCoordinator {
 
         interceptor.isAllowed = { [weak self] in
             guard let self else { return false }
-            return self.isEnabled && GlanceSettings.shared.interceptSystemAuth
+            return self.isEnabled && (GlanceSettings.shared.interceptSystemAuth || GlanceSettings.shared.interceptAnyPasswordPrompt)
         }
         interceptor.allowsAnyApp = { GlanceSettings.shared.interceptAnyPasswordPrompt }
         interceptor.onPromptAppeared = { [weak self] _ in self?.handleSystemPrompt() }
@@ -99,7 +102,7 @@ final class FaceUnlockCoordinator {
         // Typing it again would only run up failed attempts, so leave the prompt to the user for a while.
         if let typedAt = lastInSessionTypedAt, ContinuousClock.now - typedAt < Self.retryCooldown { return }
         // Any unmet gate leaves the prompt untouched, so Touch ID / typing the password works as normal.
-        guard isEnabled, GlanceSettings.shared.interceptSystemAuth,
+        guard isEnabled, GlanceSettings.shared.interceptSystemAuth || GlanceSettings.shared.interceptAnyPasswordPrompt,
               !LockMonitor.isScreenActuallyLocked(),
               !NotchOverlayController.shared.isArmed,
               NotchOverlayController.shared.phase != .scanning,
@@ -113,6 +116,7 @@ final class FaceUnlockCoordinator {
             return
         }
 
+        Self.lockLog.notice("prompt accepted: covering it and scanning")
         interceptor.hideCurrentPrompt()
         if showsUI {
             NotchOverlayController.shared.present(onRetry: { [weak self] in self?.startScanCycle(.inSessionAuth) })
@@ -404,8 +408,8 @@ final class FaceUnlockCoordinator {
         let similarity = FaceEmbedding.average(enrolled).map { FaceEmbedding.cosineSimilarity(result.embedding, $0) } ?? 0
         let quality = result.quality ?? 0
         guard GlanceSettings.shared.adaptiveLearningEnabled, livenessEnabled,
-              similarity >= matchThreshold + 0.06, quality >= 0.45 else {
-            Self.lockLog.notice("learning skipped: enabled=\(GlanceSettings.shared.adaptiveLearningEnabled) liveness=\(livenessEnabled) similarity=\(similarity, format: .fixed(precision: 3)) needs>=\(self.matchThreshold + 0.06, format: .fixed(precision: 3)) quality=\(quality, format: .fixed(precision: 2)) needs>=0.45")
+              similarity >= matchThreshold + 0.06, quality >= Self.learningMinimumQuality else {
+            Self.lockLog.notice("learning skipped: enabled=\(GlanceSettings.shared.adaptiveLearningEnabled) liveness=\(livenessEnabled) similarity=\(similarity, format: .fixed(precision: 3)) needs>=\(self.matchThreshold + 0.06, format: .fixed(precision: 3)) quality=\(quality, format: .fixed(precision: 2)) needs>=\(Self.learningMinimumQuality, format: .fixed(precision: 2))")
             return
         }
         do {
@@ -550,7 +554,10 @@ final class FaceUnlockCoordinator {
                 // In-session: re-check focus on the typing thread, so a dialog cancelled since the check above gets no keystrokes.
                 var focusCheck: (@Sendable () -> Bool)?
                 if context == .inSessionAuth { focusCheck = { SystemAuthInterceptor.isSecureFieldFocused() } }
-                await pocController.injectStoredPassword(requireAuthoritativeLock: context == .lockScreen, beforeTyping: focusCheck)
+                let typed = await pocController.injectStoredPassword(requireAuthoritativeLock: context == .lockScreen, beforeTyping: focusCheck)
+                Self.lockLog.notice("injection result (typed=\(typed)): \(self.pocController.statusMessage, privacy: .public)")
+                // In-session, a refused or failed typing must not look like a success: show the failure and give the dialog back.
+                if context == .inSessionAuth, !typed { return .passwordFieldUnavailable }
                 // After the unlock, so learning can never delay or block it.
                 learnFromMatch(readyMatch, result: result, livenessEnabled: livenessEnabled)
                 return .matched

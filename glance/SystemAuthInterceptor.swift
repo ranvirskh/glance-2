@@ -49,6 +49,8 @@ final class SystemAuthInterceptor {
     private var isScanning = false
     private var missedScans = 0
     private var tickCount = 0
+    private var boostUntil = Date.distantPast
+    private var timerInterval: TimeInterval = 0
     private static var askedForScreenCapture = false
     private var lastGate = ""
     nonisolated private static let log = Logger(subsystem: "glance.auth", category: "interceptor")
@@ -64,8 +66,12 @@ final class SystemAuthInterceptor {
         for name in [NSWorkspace.didActivateApplicationNotification,
                      NSWorkspace.didLaunchApplicationNotification,
                      NSWorkspace.didTerminateApplicationNotification] {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refreshTimer() }
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    // A system prompt usually brings its app to the front, so after any app switch check at full rate for a moment.
+                    if note.name == NSWorkspace.didActivateApplicationNotification { self?.boostUntil = Date().addingTimeInterval(3) }
+                    self?.refreshTimer()
+                }
             })
         }
         refreshTimer()
@@ -75,17 +81,27 @@ final class SystemAuthInterceptor {
     private func refreshTimer() {
         let chromeRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: Self.chromeBundleID).isEmpty
         if chromeRunning || currentPrompt != nil || allowsAnyApp() {
-            guard timer == nil else { return }
-            // 80ms: the dialog is visible until the next tick notices it, so this is the length of the flash before the cover appears.
-            timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.tick() }
-            }
-            // Lets macOS coalesce these wakeups with other timers instead of waking the CPU for each one.
-            timer?.tolerance = 0.04
+            if timer == nil { setTimerInterval(Self.idleInterval) }
         } else {
             timer?.invalidate()
             timer = nil
         }
+    }
+
+    /// Slow while nothing suggests a prompt is coming, fast (80ms — the length of the flash before the cover appears) while one is
+    /// likely. `tick()` switches between the two, so an idle Mac isn't woken a dozen times a second for nothing.
+    private static let idleInterval: TimeInterval = 0.25
+    private static let hotInterval: TimeInterval = 0.08
+
+    private func setTimerInterval(_ interval: TimeInterval) {
+        guard interval != timerInterval || timer == nil else { return }
+        timer?.invalidate()
+        timerInterval = interval
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        // Lets macOS coalesce these wakeups with other timers instead of waking the CPU for each one.
+        timer?.tolerance = interval / 2
     }
 
     // MARK: - Detection
@@ -95,9 +111,10 @@ final class SystemAuthInterceptor {
         let chromeApp = NSRunningApplication.runningApplications(withBundleIdentifier: Self.chromeBundleID).first
         if chromeApp?.isActive == true { lastChromeFrontAt = Date() }
         let recentChrome = lastChromeFrontAt.map { Date().timeIntervalSince($0) < Self.chromeRecency } ?? false
-        // Battery: full 120ms rate only while a prompt is plausible (Chrome frontmost/just was, or one is up); otherwise ~1s.
+        // Battery: fast only while a prompt is plausible (Chrome frontmost/just was, an app just came forward, or one is up).
         let anyApp = allowsAnyApp()
-        guard recentChrome || currentPrompt != nil || tickCount % (anyApp ? 6 : 12) == 0 else { return }
+        let hot = recentChrome || currentPrompt != nil || (anyApp && Date() < boostUntil)
+        setTimerInterval(hot ? Self.hotInterval : (anyApp ? Self.idleInterval : 1.0))
         // Nothing to watch while the display is off.
         guard CGDisplayIsAsleep(CGMainDisplayID()) == 0 else { return }
 
@@ -305,15 +322,21 @@ final class SystemAuthInterceptor {
     /// Presses "Use Password…" if needed, waits for the secure field, focuses it, and checks the system really focused it.
     /// Returns false (nothing typed) unless the next keystrokes will land in that field.
     func prepareForPassword(timeout: Duration = .seconds(7)) async -> Bool {
-        let deadline = ContinuousClock.now + timeout
+        let started = ContinuousClock.now
+        let deadline = started + timeout
         var pressed = false
         // Re-reads `currentPrompt` each pass: pressing the button can replace the window.
         while ContinuousClock.now < deadline, let prompt = currentPrompt {
             let step = await Task.detached { Self.passwordStep(prompt, press: !pressed) }.value
-            if step.focused { return true }
+            if step.pressed && !pressed { Self.log.notice("password mode: pressed the password button at \(String(describing: ContinuousClock.now - started), privacy: .public)") }
+            if step.focused {
+                Self.log.notice("password mode: field focused at \(String(describing: ContinuousClock.now - started), privacy: .public)")
+                return true
+            }
             pressed = pressed || step.pressed
             try? await Task.sleep(for: .milliseconds(20))
         }
+        Self.log.notice("password mode: gave up (pressed=\(pressed), prompt still there=\(self.currentPrompt != nil))")
         return false
     }
 
