@@ -12,6 +12,7 @@ import ApplicationServices
 import CoreGraphics
 import Darwin
 import OSLog
+import os
 
 /// An on-screen auth prompt. AXUIElement is a CF reference that is safe to hand between threads.
 struct AuthPrompt: @unchecked Sendable {
@@ -54,7 +55,8 @@ final class SystemAuthInterceptor {
     private var lastGate = ""
     nonisolated private static let log = Logger(subsystem: "glance.auth", category: "interceptor")
     /// Rate-limits the "ignored" log, which would otherwise print on every 120ms tick while the dialog is up.
-    nonisolated(unsafe) private static var lastIgnoredKey = ""
+    /// Locked because scans and the password-mode step both run off the main thread and can reach it at the same time.
+    private static let lastIgnoredKey = OSAllocatedUnfairLock(initialState: "")
 
     // MARK: - Lifecycle
 
@@ -243,11 +245,10 @@ final class SystemAuthInterceptor {
             let windows = axWindows(of: pid)
             if !tracking, !anyApp, find(in: windows, where: { labels($0).contains { $0.contains("chrome") } }) == nil {
                 let key = "\(pid)-\(number)"
-                if key != lastIgnoredKey {
-                    lastIgnoredKey = key
+                if lastIgnoredKey.withLock({ let changed = $0 != key; $0 = key; return changed }) {
                     var seen: [String] = []
                     _ = find(in: windows) { seen.append(contentsOf: labels($0)); return false }
-                    log.notice("system dialog ignored, no Chrome text. owner=\(owner, privacy: .public) windows=\(windows.count) text=\(seen.prefix(8).joined(separator: " / "), privacy: .public)")
+                    log.notice("system dialog ignored, no Chrome text. owner=\(owner, privacy: .public) windows=\(windows.count) text=\(seen.prefix(8).joined(separator: " / "), privacy: .private)")
                 }
                 continue
             }
