@@ -75,8 +75,8 @@ final class FaceUnlockCoordinator {
     private let interceptor = SystemAuthInterceptor()
     private static let lockLog = Logger(subsystem: "glance.auth", category: "unlock")
     /// Vision's capture-quality score a frame needs before it may teach the profile. Laptop webcams at lock-screen distance
-    /// typically score ~0.3, so a higher bar meant learning never ran; the match-strength requirement is what keeps it safe.
-    private static let learningMinimumQuality: Float = 0.30
+    /// score 0.29–0.33, so a higher bar meant learning never ran; the match-strength requirement is what keeps it safe.
+    private static let learningMinimumQuality: Float = 0.25
 
     init(pocController: POCController) {
         self.pocController = pocController
@@ -117,7 +117,6 @@ final class FaceUnlockCoordinator {
         }
 
         Self.lockLog.notice("prompt accepted: covering it and scanning")
-        interceptor.hideCurrentPrompt()
         if showsUI {
             NotchOverlayController.shared.present(onRetry: { [weak self] in self?.startScanCycle(.inSessionAuth) })
         }
@@ -126,7 +125,6 @@ final class FaceUnlockCoordinator {
 
     /// The user answered the prompt themselves (Touch ID, typed, cancelled) — stop scanning and clean up.
     private func handleSystemPromptGone() {
-        interceptor.restoreCurrentPrompt()
         guard scanContext == .inSessionAuth, !inSessionMatched else { return }
         scanTask?.cancel()
         scanTask = nil
@@ -238,7 +236,6 @@ final class FaceUnlockCoordinator {
         autoRetryTask?.cancel()
         autoRetryTask = nil
         camera.stop()
-        interceptor.restoreCurrentPrompt()
         NotchOverlayController.shared.disarm()
         // Covers isEnabled being switched off directly, keeping "disarmed" and "not listening for space" in lockstep.
         spaceKeyMonitor.stop()
@@ -309,7 +306,6 @@ final class FaceUnlockCoordinator {
         let generation = scanGeneration
         scanContext = context
         inSessionMatched = false
-        if context == .inSessionAuth { interceptor.hideCurrentPrompt() }
         scanTask = Task { [weak self] in
             await self?.runScanCycle(generation: generation, context: context)
         }
@@ -329,7 +325,6 @@ final class FaceUnlockCoordinator {
             Self.lockLog.error("camera unavailable: \(error, privacy: .public)")
             statusMessage = error
             camera.stop()
-            if context == .inSessionAuth { interceptor.restoreCurrentPrompt() }
             return
         }
 
@@ -351,19 +346,12 @@ final class FaceUnlockCoordinator {
         camera.stop()
         let sinceArm = lastArmedAt.map { String(describing: ContinuousClock.now - $0) } ?? "n/a"
         Self.lockLog.notice("scan finished: \(String(describing: outcome), privacy: .public) (\(String(describing: context), privacy: .public)) \(sinceArm, privacy: .public) after arming")
-        // Any non-match leaves the real prompt for the user, so unhide it.
-        if context == .inSessionAuth, outcome != .matched { interceptor.restoreCurrentPrompt() }
 
         switch outcome {
         case .matched:
             // The unlock already happened inside observeScanWindow — this only decides whether anything is shown about it.
             if showsUI {
                 NotchOverlayController.shared.finish(success: true)
-            }
-            if context == .inSessionAuth {
-                // Keep the mask up until the dialog dismisses itself, so the password screen never flashes.
-                await interceptor.waitUntilGone(timeout: .seconds(1.5))
-                interceptor.restoreCurrentPrompt()
             }
         case .passwordFieldUnavailable:
             statusMessage = "Face matched, but the password field wasn't reachable — use Touch ID or type it."

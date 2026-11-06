@@ -2,16 +2,15 @@
 //  SystemAuthInterceptor.swift
 //  glance
 //
-//  Watches for Touch ID / password prompts raised by Chrome (CoreAuthUI, SecurityAgent, or a Chrome sheet),
-//  hides them while the face scan runs, then flips the prompt to password mode so the stored password can be typed.
-//  Opt-in (GlanceSettings.interceptSystemAuth). Only acts while Chrome has been frontmost in the last few seconds.
+//  Watches for Touch ID / password prompts (system dialogs, or sheets inside an app such as Safari's AutoFill or Chrome's), lets the
+//  coordinator scan the face while the normal prompt stays visible, then flips the prompt to password mode and types the stored
+//  password. Chrome-only unless GlanceSettings.interceptAnyPasswordPrompt is on.
 //
 
 import AppKit
 import ApplicationServices
 import CoreGraphics
 import OSLog
-import ScreenCaptureKit
 
 /// An on-screen auth prompt. AXUIElement is a CF reference that is safe to hand between threads.
 struct AuthPrompt: @unchecked Sendable {
@@ -22,8 +21,6 @@ struct AuthPrompt: @unchecked Sendable {
     /// Candidate for the off-screen move. nil for Chrome sheets (they live inside Chrome's window).
     let axWindow: AXUIElement?
     let roots: [AXUIElement]
-    /// For excluding the dialog from the backdrop capture. nil for Chrome sheets (they aren't separate windows).
-    var windowID: CGWindowID? = nil
 }
 
 @MainActor
@@ -51,13 +48,12 @@ final class SystemAuthInterceptor {
     private var tickCount = 0
     private var boostUntil = Date.distantPast
     private var timerInterval: TimeInterval = 0
-    private static var askedForScreenCapture = false
+    private var axObserver: AXObserver?
+    private var observedPID: pid_t = 0
     private var lastGate = ""
     nonisolated private static let log = Logger(subsystem: "glance.auth", category: "interceptor")
     /// Rate-limits the "ignored" log, which would otherwise print on every 120ms tick while the dialog is up.
     nonisolated(unsafe) private static var lastIgnoredKey = ""
-
-    private var shield: NSPanel?
 
     // MARK: - Lifecycle
 
@@ -69,12 +65,44 @@ final class SystemAuthInterceptor {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 MainActor.assumeIsolated {
                     // A system prompt usually brings its app to the front, so after any app switch check at full rate for a moment.
-                    if note.name == NSWorkspace.didActivateApplicationNotification { self?.boostUntil = Date().addingTimeInterval(3) }
+                    if note.name == NSWorkspace.didActivateApplicationNotification {
+                        self?.boostUntil = Date().addingTimeInterval(3)
+                        let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                        self?.observeSheets(of: app?.processIdentifier)
+                    }
                     self?.refreshTimer()
                 }
             })
         }
+        observeSheets(of: NSWorkspace.shared.frontmostApplication?.processIdentifier)
         refreshTimer()
+    }
+
+    /// In any-app mode, asks the app in front to tell us the moment it opens a sheet or window, so an auth sheet (Safari's AutoFill
+    /// one, say) is covered right away instead of waiting for the next poll. Event-driven, so it costs nothing while nothing happens.
+    private func observeSheets(of pid: pid_t?) {
+        guard allowsAnyApp(), let pid, pid != observedPID, pid != ProcessInfo.processInfo.processIdentifier else { return }
+        if let old = axObserver { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(old), .defaultMode) }
+        axObserver = nil
+        observedPID = pid
+
+        let callback: AXObserverCallback = { _, _, _, refcon in
+            guard let refcon else { return }
+            let me = Unmanaged<SystemAuthInterceptor>.fromOpaque(refcon).takeUnretainedValue()
+            MainActor.assumeIsolated {
+                me.boostUntil = Date().addingTimeInterval(3)
+                me.tick()
+            }
+        }
+        var created: AXObserver?
+        guard AXObserverCreate(pid, callback, &created) == .success, let observer = created else { return }
+        let app = AXUIElementCreateApplication(pid)
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        for name in [kAXSheetCreatedNotification, kAXWindowCreatedNotification] {
+            AXObserverAddNotification(observer, app, name as CFString, refcon)
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        axObserver = observer
     }
 
     /// 120ms polling only while Chrome is running (or a prompt is up) — otherwise there is nothing to watch.
@@ -128,13 +156,17 @@ final class SystemAuthInterceptor {
         if let chromeApp { enableChromeAccessibility(chromeApp) }
         guard !isScanning else { return }
         isScanning = true
-        let chromePID = chromeApp?.processIdentifier
         let chromeFront = chromeApp?.isActive ?? false
+        // Sheets (like Safari's AutoFill one) belong to the app in front. Any-app mode checks whichever it is, except Glance itself.
+        let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let sheetPID: pid_t? = anyApp
+            ? frontPID.flatMap { $0 == ProcessInfo.processInfo.processIdentifier ? nil : $0 }
+            : (chromeFront ? chromeApp?.processIdentifier : nil)
         // The accessibility-tree walk is the costly part: look for a *new* Chrome sheet every 3rd tick, but keep checking one we already track.
         let tracking = currentPrompt != nil
         let scanSheet = tickCount % 4 == 0 || tracking
         Task.detached(priority: .utility) { [weak self] in
-            let found = Self.findPrompt(chromePID: chromePID, chromeFrontmost: chromeFront, chromeRecent: recentChrome, scanSheet: scanSheet, tracking: tracking, anyApp: anyApp)
+            let found = Self.findPrompt(sheetPID: sheetPID, chromeFrontmost: chromeFront, chromeRecent: recentChrome, scanSheet: scanSheet, tracking: tracking, anyApp: anyApp)
             await self?.finishScan(found)
         }
     }
@@ -149,11 +181,7 @@ final class SystemAuthInterceptor {
         }
         missedScans = 0
         guard found.key != currentPrompt?.key else { return }
-        // A replacement window (mode switch) must be hidden too if the one it replaced was.
-        let wasHidden = shield != nil
-        if wasHidden { restoreCurrentPrompt() }
         currentPrompt = found
-        if wasHidden { hideCurrentPrompt() }
         onPromptAppeared?(found)
     }
 
@@ -172,10 +200,10 @@ final class SystemAuthInterceptor {
         AXUIElementSetAttributeValue(element, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
     }
 
-    private nonisolated static func findPrompt(chromePID: pid_t?, chromeFrontmost: Bool, chromeRecent: Bool, scanSheet: Bool, tracking: Bool, anyApp: Bool) -> AuthPrompt? {
+    private nonisolated static func findPrompt(sheetPID: pid_t?, chromeFrontmost: Bool, chromeRecent: Bool, scanSheet: Bool, tracking: Bool, anyApp: Bool) -> AuthPrompt? {
         // `tracking`: a prompt already accepted stays visible to us for as long as it is on screen, however long the user takes.
         if chromeRecent || chromeFrontmost || tracking || anyApp, let prompt = findSystemPrompt(tracking: tracking, anyApp: anyApp) { return prompt }
-        if chromeFrontmost, scanSheet, let chromePID { return findChromeSheet(pid: chromePID) }
+        if scanSheet, let sheetPID { return findSheet(pid: sheetPID) }
         return nil
     }
 
@@ -203,12 +231,13 @@ final class SystemAuthInterceptor {
                 continue
             }
             let match = windows.first { windowFrame($0).map { abs($0.minX - frame.minX) < 2 && abs($0.minY - frame.minY) < 2 } ?? false }
-            return AuthPrompt(key: "\(pid)-\(number)", pid: pid, frame: frame, axWindow: match ?? windows.first, roots: windows, windowID: CGWindowID(number))
+            return AuthPrompt(key: "\(pid)-\(number)", pid: pid, frame: frame, axWindow: match ?? windows.first, roots: windows)
         }
         return nil
     }
 
-    private nonisolated static func findChromeSheet(pid: pid_t) -> AuthPrompt? {
+    /// An auth sheet or dialog inside an app's own window (Chrome's, Safari's AutoFill sheet, ...), found by its Touch ID / password wording.
+    private nonisolated static func findSheet(pid: pid_t) -> AuthPrompt? {
         for window in axWindows(of: pid) {
             let candidates = children(window, kAXChildrenAttribute) + children(window, "AXSheets") + [window]
             for element in candidates {
@@ -216,105 +245,10 @@ final class SystemAuthInterceptor {
                 let isDialog = string(element, kAXRoleAttribute) == kAXSheetRole
                     || subrole == kAXDialogSubrole || subrole == kAXSystemDialogSubrole
                 guard isDialog, containsAuthControls(element), let frame = windowFrame(element) else { continue }
-                return AuthPrompt(key: "chrome-\(pid)", pid: pid, frame: frame, axWindow: nil, roots: [element])
+                return AuthPrompt(key: "sheet-\(pid)", pid: pid, frame: frame, axWindow: nil, roots: [element])
             }
         }
         return nil
-    }
-
-    // MARK: - Hide / restore
-
-    /// Idempotent. The dialog stays exactly where macOS put it; a cover on top hides it (macOS won't let us move or reorder it).
-    func hideCurrentPrompt() {
-        guard let prompt = currentPrompt, shield == nil else { return }
-        showShield(over: prompt.frame, windowID: prompt.windowID)
-    }
-
-    /// Drops the cover. Safe to call when nothing is hidden.
-    func restoreCurrentPrompt() {
-        guard let panel = shield else { return }
-        shield = nil
-        // Fades out instead of popping, so the cover leaves the way the notch animation does.
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.18
-            panel.animator().alphaValue = 0
-        }, completionHandler: { panel.orderOut(nil) })
-    }
-
-    func waitUntilGone(timeout: Duration) async {
-        let deadline = ContinuousClock.now + timeout
-        while currentPrompt != nil, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(50))
-        }
-    }
-
-    /// Extra margin so the dialog's drop shadow, which isn't part of its window bounds, is covered too.
-    private static let shieldPadding: CGFloat = 40
-
-    private func showShield(over dialogFrame: CGRect, windowID: CGWindowID?) {
-        guard let primary = NSScreen.screens.first else { return }
-        let cgFrame = dialogFrame.insetBy(dx: -Self.shieldPadding, dy: -Self.shieldPadding)
-        // CG is top-left origin, AppKit bottom-left; both are relative to the primary display.
-        let frame = CGRect(x: cgFrame.minX, y: primary.frame.height - cgFrame.maxY, width: cgFrame.width, height: cgFrame.height)
-        let panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
-        panel.ignoresMouseEvents = true
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-        let blur = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
-        blur.material = .hudWindow
-        blur.blendingMode = .behindWindow
-        blur.state = .active
-        blur.wantsLayer = true
-        // Blur alone leaves the dialog's text faintly legible; the dark tint finishes the masking.
-        blur.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.7).cgColor
-        blur.layer?.cornerRadius = 12
-        panel.contentView = blur
-        panel.orderFrontRegardless()
-        shield = panel
-
-        // The blur covers the dialog immediately; once a clean backdrop is captured it is swapped for the "nothing there" look.
-        Task { [weak self, weak panel] in
-            guard let image = await Self.captureBackdrop(of: cgFrame, excluding: windowID),
-                  let self, let panel, self.shield === panel else { return }
-            // Crossfaded over the blur rather than swapped in, so the cover doesn't visibly jump from dark to the page.
-            let view = NSImageView(frame: NSRect(origin: .zero, size: frame.size))
-            view.image = image
-            view.imageScaling = .scaleAxesIndependently
-            view.alphaValue = 0
-            panel.contentView?.addSubview(view)
-            NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.12
-                view.animator().alphaValue = 1
-            }, completionHandler: nil)
-        }
-    }
-
-    /// A picture of the screen region with the dialog and Glance's own windows left out. Returns nil (caller keeps the blur) unless
-    /// Screen Recording is granted AND the dialog was found and excluded — otherwise the picture would show the dialog itself.
-    private static func captureBackdrop(of frame: CGRect, excluding windowID: CGWindowID?) async -> NSImage? {
-        guard let windowID else { return nil }
-        guard CGPreflightScreenCaptureAccess() else {
-            // Once per launch: asking on every prompt kept putting a system alert next to the dialog.
-            if !askedForScreenCapture { askedForScreenCapture = true; _ = CGRequestScreenCaptureAccess() }
-            return nil
-        }
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
-              let display = content.displays.first(where: { $0.frame.intersects(frame) }),
-              content.windows.contains(where: { $0.windowID == windowID }) else { return nil }
-        let mine = Bundle.main.bundleIdentifier
-        let excluded = content.windows.filter { $0.windowID == windowID || $0.owningApplication?.bundleIdentifier == mine }
-        let filter = SCContentFilter(display: display, excludingWindows: excluded)
-        let config = SCStreamConfiguration()
-        config.sourceRect = frame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
-        let scale = CGFloat(filter.pointPixelScale)
-        config.width = Int(frame.width * scale)
-        config.height = Int(frame.height * scale)
-        config.showsCursor = false
-        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) else { return nil }
-        return NSImage(cgImage: image, size: frame.size)
     }
 
     // MARK: - Password mode
@@ -342,7 +276,10 @@ final class SystemAuthInterceptor {
 
     private nonisolated static func passwordStep(_ prompt: AuthPrompt, press: Bool) -> (focused: Bool, pressed: Bool) {
         // System prompts rebuild their window tree when switching modes, so re-read it each time.
-        let roots = prompt.axWindow != nil ? axWindows(of: prompt.pid) : prompt.roots
+        var roots = prompt.axWindow != nil ? axWindows(of: prompt.pid) : prompt.roots
+        // After "Enter Password…" an in-app sheet can hand over to a separate system dialog, so look there for the field too.
+        if prompt.axWindow == nil, find(in: roots, where: isSecureField) == nil,
+           let system = findSystemPrompt(tracking: true, anyApp: true) { roots += system.roots }
         if let field = find(in: roots, where: isSecureField) {
             AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
             let focused = focusedElement().map { CFEqual($0, field) } ?? false
