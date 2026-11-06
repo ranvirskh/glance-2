@@ -29,6 +29,12 @@ enum IslandBridge {
         }
     }
 
+    /// The tap Glance's own notch gives on a successful unlock, which Isle's island doesn't know to give.
+    static func playSuccessHaptic() {
+        guard isleShowsScan, GlanceSettings.shared.hapticFeedbackEnabled else { return }
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
+    }
+
     static func show(symbol: String, title: String, subtitle: String = "") {
         guard isleShowsScan else { return }
         var info: [String: Any] = ["v": 1, "source": "glance2", "id": "scan", "symbol": symbol, "title": String(title.prefix(40))]

@@ -397,7 +397,9 @@ final class FaceUnlockCoordinator {
     /// The scan's result as Isle's "Face ID" pop-up (does nothing unless Isle is running and showing the scan).
     private func reportToIsle(_ outcome: ScanOutcome) {
         switch outcome {
-        case .matched: IslandBridge.show(symbol: "checkmark.circle.fill", title: "Unlocked", subtitle: "Password filled in")
+        case .matched:
+            IslandBridge.show(symbol: "checkmark.circle.fill", title: "Unlocked", subtitle: "Password filled in")
+            IslandBridge.playSuccessHaptic()
         case .consistentlyWrongFace: IslandBridge.show(symbol: "xmark.circle.fill", title: "Face not recognized")
         case .spoofSuspected: IslandBridge.show(symbol: "exclamationmark.shield.fill", title: "Couldn't confirm a live face")
         case .noResolution: IslandBridge.show(symbol: "faceid", title: "No face detected")
