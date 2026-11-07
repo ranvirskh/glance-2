@@ -72,9 +72,18 @@ final class FaceUnlockCoordinator {
     /// Latched once an in-session scan matches, so the prompt changing under the password sequence doesn't cancel it.
     private var inSessionMatched = false
     private var lastInSessionTypedAt: ContinuousClock.Instant?
+
+    /// Like Face ID: a live face that just missed the threshold, kept briefly. If the screen is then unlocked by typing the password,
+    /// that proves it was the owner on a bad day (new glasses, dim light), so it becomes a learned sample. Lock screen only: the OS
+    /// confirming the password is what vouches for the face, and an in-app prompt can't tell a password from a Cancel.
+    private struct NearMiss { let identityID: UUID; let embedding: [Float]; let quality: Float?; let enrolledSimilarity: Float; let at: ContinuousClock.Instant }
+    private var pendingNearMiss: NearMiss?
     /// Set when a prompt returns right after the password was typed (it was wrong). No auto-typing until then, or until the session is re-unlocked.
     private var typingPausedUntil: ContinuousClock.Instant?
     private static let retryCooldown: Duration = .seconds(20)
+    /// How far below the match threshold a live face may score and still be learned from, once the owner proves who they are by password.
+    private static let nearMissMargin: Float = 0.08
+    private static let nearMissWindow: Duration = .seconds(30)
     private static let wrongPasswordPause: Duration = .seconds(600)
     private let interceptor = SystemAuthInterceptor()
     private static let lockLog = Logger(subsystem: "glance.auth", category: "unlock")
@@ -192,6 +201,7 @@ final class FaceUnlockCoordinator {
             hasArmedForCurrentLock = false
             hasAutoRetriedForCurrentLock = false
             disarmOverlay()
+            learnFromNearMiss()
             return
         }
         guard !lockMonitor.isSleeping else { return }
@@ -414,6 +424,21 @@ final class FaceUnlockCoordinator {
         }
     }
 
+    /// The screen just unlocked with no face match from Glance, so the user typed the password: learn from the near-miss scan, if any.
+    private func learnFromNearMiss() {
+        defer { pendingNearMiss = nil }
+        guard let miss = pendingNearMiss, ContinuousClock.now - miss.at < Self.nearMissWindow,
+              GlanceSettings.shared.adaptiveLearningEnabled, GlanceSettings.shared.livenessChecksEnabled,
+              (miss.quality ?? 0) >= Self.learningMinimumQuality,
+              miss.enrolledSimilarity >= matchThreshold - Self.nearMissMargin else { return }
+        do {
+            let stored = try FaceEnrollmentStore.shared.learnSample(for: miss.identityID, embedding: miss.embedding, quality: miss.quality, embedder: pipeline.embedder)
+            Self.lockLog.notice("learning from a near-miss after a password unlock: \(stored ? "stored a new sample" : "nothing new", privacy: .public) (similarity \(miss.enrolledSimilarity, format: .fixed(precision: 3)))")
+        } catch {
+            Logger(subsystem: "glance.auth", category: "learning").error("near-miss learning failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// Feeds Isle's Glance card. A scan that found no face at all is left out: it would bury the scans that mean something.
     private func recordHistory(_ outcome: ScanOutcome, context: ScanContext) {
         let result: String
@@ -575,7 +600,18 @@ final class FaceUnlockCoordinator {
             if let matched {
                 wrongFaceStartedAt = nil
                 readyMatch = matched
+                pendingNearMiss = nil
             } else {
+                if context == .lockScreen, livenessConfirmed, livenessEnabled,
+                   let best = scored.max(by: { $0.centroidSimilarity < $1.centroidSimilarity }),
+                   best.centroidSimilarity >= matchThreshold - Self.nearMissMargin {
+                    // Measured against the guided-enrollment samples only, same as `learnFromMatch`.
+                    let enrolled = best.identity.samples.filter { $0.pose != FaceEnrollmentStore.learnedPose }.map(\.embedding)
+                    let similarity = FaceEmbedding.average(enrolled).map { FaceEmbedding.cosineSimilarity(result.embedding, $0) } ?? 0
+                    if similarity > (pendingNearMiss?.enrolledSimilarity ?? -1) {
+                        pendingNearMiss = NearMiss(identityID: best.identity.id, embedding: result.embedding, quality: result.quality, enrolledSimilarity: similarity, at: .now)
+                    }
+                }
                 readyMatch = nil
                 if wrongFaceStartedAt == nil {
                     wrongFaceStartedAt = .now
