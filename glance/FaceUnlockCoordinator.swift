@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import AppKit
 import CoreGraphics
 import Observation
 import OSLog
@@ -370,6 +371,7 @@ final class FaceUnlockCoordinator {
 
         camera.stop()
         if context == .inSessionAuth { reportToIsle(outcome) }
+        recordHistory(outcome, context: context)
         let sinceArm = lastArmedAt.map { String(describing: ContinuousClock.now - $0) } ?? "n/a"
         Self.lockLog.notice("scan finished: \(String(describing: outcome), privacy: .public) (\(String(describing: context), privacy: .public)) \(sinceArm, privacy: .public) after arming")
 
@@ -410,6 +412,23 @@ final class FaceUnlockCoordinator {
                 scheduleAutoRetryIfEnabled(after: headlessRetryDelay)
             }
         }
+    }
+
+    /// Feeds Isle's Glance card. A scan that found no face at all is left out: it would bury the scans that mean something.
+    private func recordHistory(_ outcome: ScanOutcome, context: ScanContext) {
+        let result: String
+        switch outcome {
+        case .matched: result = "Unlocked"
+        case .consistentlyWrongFace: result = "Face not recognized"
+        case .spoofSuspected: result = "Live check failed"
+        case .passwordFieldUnavailable: result = "Couldn't fill it in"
+        case .noResolution: return
+        }
+        let place = context == .lockScreen
+            ? "Lock screen"
+            : (interceptor.currentPrompt.flatMap { NSRunningApplication(processIdentifier: $0.pid)?.localizedName } ?? "App prompt")
+        UnlockHistory.record(place: place, result: result, ok: outcome == .matched)
+        IslandBridge.publishStatus()
     }
 
     /// The scan's result as Isle's "Face ID" pop-up (does nothing unless Isle is running and showing the scan).

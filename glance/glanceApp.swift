@@ -103,6 +103,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             presentOnboardingGate()
         }
 
+        IslandBridge.startListening(
+            isEnabled: { GlanceSettings.shared.isFaceUnlockEnabled },
+            unlock: { [weak self] in
+                guard let pocController = self?.environment.pocController, !pocController.isSessionUnlocked else { return }
+                Task { await pocController.unlockSession() }
+            },
+            openSettings: { [weak self] in self?.revealSettingsWindow() }
+        )
+
         // The session key only unwraps with Touch ID, and the lock screen has no UI to ask for it — so a relaunched app would sit
         // locked and never face-unlock. Ask once at launch (only when a password is already stored; this never creates a key).
         if SecureCredentialManager.hasStoredPassword(), !environment.pocController.isSessionUnlocked {
