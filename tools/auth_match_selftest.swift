@@ -32,6 +32,8 @@ struct AuthMatchSelfTest {
         check(M.asksForPassword(text: "Enter the password for the user “Ranvir” to unlock."), "password wording")
         check(M.asksForPassword(text: "Touch ID or enter your password to continue."), "touch id wording")
         check(!M.asksForPassword(text: "Passwords Is Locked"), "title alone does not ask")
+        check(M.isLockLabel(role: "AXStaticText", text: "iPhone Mirroring Is Locked"), "iPhone Mirroring lock text")
+        check(M.asksForPassword(text: "Touch ID or enter the Mac login for “Ranvir” to continue."), "iPhone Mirroring wording asks")
         check(M.normalized("Use Password…") == "use password...", "ellipsis folded")
 
         if failures == 0 { print("auth_match_selftest: all passed") } else { print("\(failures) failed"); exit(1) }

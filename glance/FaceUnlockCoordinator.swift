@@ -72,6 +72,8 @@ final class FaceUnlockCoordinator {
     /// Latched once an in-session scan matches, so the prompt changing under the password sequence doesn't cancel it.
     private var inSessionMatched = false
     private var lastInSessionTypedAt: ContinuousClock.Instant?
+    private var lastTypedPromptKey: String?
+    private var currentPromptKey = ""
 
     /// Like Face ID: a live face that just missed the threshold, kept briefly. If the screen is then unlocked by typing the password,
     /// that proves it was the owner on a bad day (new glasses, dim light), so it becomes a learned sample. Lock screen only: the OS
@@ -103,7 +105,7 @@ final class FaceUnlockCoordinator {
             return self.isEnabled && (GlanceSettings.shared.interceptSystemAuth || GlanceSettings.shared.interceptAnyPasswordPrompt)
         }
         interceptor.allowsAnyApp = { GlanceSettings.shared.interceptAnyPasswordPrompt }
-        interceptor.onPromptAppeared = { [weak self] _ in self?.handleSystemPrompt() }
+        interceptor.onPromptAppeared = { [weak self] prompt in self?.handleSystemPrompt(key: prompt.key) }
         interceptor.onPromptGone = { [weak self] in self?.handleSystemPromptGone() }
         // Re-entering the password in Glance (session unlock) is the user fixing a stale one, so typing may resume.
         NotificationCenter.default.addObserver(forName: .secureCredentialSessionDidChange, object: nil, queue: .main) { [weak self] _ in
@@ -114,15 +116,21 @@ final class FaceUnlockCoordinator {
 
     // MARK: - In-session auth prompts (Chrome / CoreAuthUI / SecurityAgent)
 
-    private func handleSystemPrompt() {
+    private func handleSystemPrompt(key: String) {
+        currentPromptKey = key
         // After typing the password once, a dialog that comes straight back means it was wrong (e.g. the Mac password changed).
         // Typing it again would only run up failed attempts, so leave the prompt to the user for a while.
-        if let typedAt = lastInSessionTypedAt, ContinuousClock.now - typedAt < Self.retryCooldown {
+        // Only the same dialog coming back counts: a different prompt (another AutoFill, iPhone Mirroring) is a new request.
+        if let typedAt = lastInSessionTypedAt, lastTypedPromptKey == key, ContinuousClock.now - typedAt < Self.retryCooldown {
             typingPausedUntil = .now + Self.wrongPasswordPause
+            Logger(subsystem: "glance.auth", category: "coordinator").notice("same prompt returned right after typing: pausing auto-typing")
             return
         }
         if let until = typingPausedUntil {
-            if ContinuousClock.now < until { return }
+            if ContinuousClock.now < until {
+                Logger(subsystem: "glance.auth", category: "coordinator").notice("prompt left alone: auto-typing is paused")
+                return
+            }
             typingPausedUntil = nil
         }
         // Any unmet gate leaves the prompt untouched, so Touch ID / typing the password works as normal.
@@ -633,6 +641,7 @@ final class FaceUnlockCoordinator {
                     // Types nothing unless the system confirms the password field has focus.
                     guard await interceptor.prepareForPassword() else { return .passwordFieldUnavailable }
                     lastInSessionTypedAt = .now
+                    lastTypedPromptKey = currentPromptKey
                 }
                 // In-session: re-check focus on the typing thread, so a dialog cancelled since the check above gets no keystrokes.
                 var focusCheck: (@Sendable () -> Bool)?

@@ -10,7 +10,7 @@ import Foundation
 
 enum AuthPromptMatching {
     /// Apple apps whose own lock screen (a plain window, not a dialog) takes the Mac password.
-    static let lockScreenBundleIDs: Set<String> = ["com.apple.Passwords", "com.apple.Notes"]
+    static let lockScreenBundleIDs: Set<String> = ["com.apple.Passwords", "com.apple.Notes", "com.apple.ScreenContinuity"]
 
     /// Lowercased, with Apple's typographic ellipsis/apostrophe folded to ASCII so "Use Password…" matches "use password...".
     static func normalized(_ text: String) -> String {
