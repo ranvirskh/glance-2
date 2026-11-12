@@ -74,6 +74,7 @@ final class FaceUnlockCoordinator {
     private var lastInSessionTypedAt: ContinuousClock.Instant?
     private var lastTypedPromptKey: String?
     private var currentPromptKey = ""
+    private var quickRepeats = 0
 
     /// Like Face ID: a live face that just missed the threshold, kept briefly. If the screen is then unlocked by typing the password,
     /// that proves it was the owner on a bad day (new glasses, dim light), so it becomes a learned sample. Lock screen only: the OS
@@ -86,7 +87,7 @@ final class FaceUnlockCoordinator {
     /// How far below the match threshold a live face may score and still be learned from, once the owner proves who they are by password.
     private static let nearMissMargin: Float = 0.08
     private static let nearMissWindow: Duration = .seconds(30)
-    private static let wrongPasswordPause: Duration = .seconds(600)
+    private static let wrongPasswordPause: Duration = .seconds(120)
     private let interceptor = SystemAuthInterceptor()
     private static let lockLog = Logger(subsystem: "glance.auth", category: "unlock")
     /// Vision's capture-quality score a frame needs before it may teach the profile. Laptop webcams at lock-screen distance
@@ -109,7 +110,7 @@ final class FaceUnlockCoordinator {
         interceptor.onPromptGone = { [weak self] in self?.handleSystemPromptGone() }
         // Re-entering the password in Glance (session unlock) is the user fixing a stale one, so typing may resume.
         NotificationCenter.default.addObserver(forName: .secureCredentialSessionDidChange, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.typingPausedUntil = nil }
+            MainActor.assumeIsolated { self?.typingPausedUntil = nil; self?.quickRepeats = 0 }
         }
         interceptor.start()
     }
@@ -122,9 +123,15 @@ final class FaceUnlockCoordinator {
         // Typing it again would only run up failed attempts, so leave the prompt to the user for a while.
         // Only the same dialog coming back counts: a different prompt (another AutoFill, iPhone Mirroring) is a new request.
         if let typedAt = lastInSessionTypedAt, lastTypedPromptKey == key, ContinuousClock.now - typedAt < Self.retryCooldown {
-            typingPausedUntil = .now + Self.wrongPasswordPause
-            Logger(subsystem: "glance.auth", category: "coordinator").notice("same prompt returned right after typing: pausing auto-typing")
-            return
+            // Safari can legitimately ask twice in a row, so one quick repeat is allowed; the second one means a wrong password.
+            quickRepeats += 1
+            if quickRepeats >= 2 {
+                typingPausedUntil = .now + Self.wrongPasswordPause
+                Logger(subsystem: "glance.auth", category: "coordinator").notice("same prompt returned twice right after typing: pausing auto-typing")
+                return
+            }
+        } else {
+            quickRepeats = 0
         }
         if let until = typingPausedUntil {
             if ContinuousClock.now < until {
@@ -592,6 +599,7 @@ final class FaceUnlockCoordinator {
                 case .denied:
                     // Overrides everything, including a match and any confirmation that already happened.
                     lastOutcome = snapshot.decision.denialReason
+                    Self.lockLog.notice("liveness denied: \(snapshot.decision.denialReason ?? "unknown", privacy: .public)")
                     return .spoofSuspected
                 case .confirmed(let cue):
                     livenessConfirmed = true
