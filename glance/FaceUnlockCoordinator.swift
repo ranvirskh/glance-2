@@ -599,7 +599,8 @@ final class FaceUnlockCoordinator {
                 case .denied:
                     // Overrides everything, including a match and any confirmation that already happened.
                     lastOutcome = snapshot.decision.denialReason
-                    Self.lockLog.notice("liveness denied: \(snapshot.decision.denialReason ?? "unknown", privacy: .public)")
+                    let glossLevel = snapshot.state(for: .glossGlare).reading.level
+                    Self.lockLog.notice("liveness denied: \(snapshot.decision.denialReason ?? "unknown", privacy: .public) gloss=\(glossLevel)")
                     return .spoofSuspected
                 case .confirmed(let cue):
                     livenessConfirmed = true
